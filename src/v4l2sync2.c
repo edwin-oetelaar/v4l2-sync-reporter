@@ -53,19 +53,27 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/videodev.h>
 #include <stdint.h>
 
-struct v4l2_queryctrl queryctrl;
-struct v4l2_querymenu querymenu;
+// struct v4l2_queryctrl queryctrl;
+// struct v4l2_querymenu querymenu;
 struct v4l2_input input;
 struct v4l2_output output;
 
-int fd;
+int fd; // handle to device
 
-const char dev_name[] = "/dev/video0";
+const char dev_name[] = "/dev/video0"; // default name
+char *inputtype[] = { "unknown", "tuner", "camera", 0, 0, 0, 0 };
+char buf[100]; // string buf
+int timeout = 300; // default timeout in seconds
+int shorttime = 50000; // microseconds to wait for input get ready
+struct timespec ts;
+int goodsignal = 0;
+int goodinput = -1;
 
 static void open_device(void) {
 	struct stat st;
@@ -89,27 +97,6 @@ static void open_device(void) {
 		exit(EXIT_FAILURE);
 	}
 }
-#if 0
-static void enumerate_menu(void) {
-	printf("  Menu items:\n");
-
-	memset(&querymenu, 0, sizeof(querymenu));
-	querymenu.id = queryctrl.id;
-
-	for (querymenu.index = queryctrl.minimum; querymenu.index
-			<= queryctrl.maximum; querymenu.index++) {
-		if (0 == ioctl(fd, VIDIOC_QUERYMENU, &querymenu)) {
-			printf("  %s\n", querymenu.name);
-		} else {
-			perror("VIDIOC_QUERYMENU");
-			exit(EXIT_FAILURE);
-		}
-	}
-}
-#endif
-
-char *inputtype[] = { "unknown", "tuner", "camera", 0, 0, 0, 0 };
-char buf[100];
 
 char *status_to_text(int s, char *b, int len) {
 	memset(b, 0, len);
@@ -146,120 +133,126 @@ char *status_to_text(int s, char *b, int len) {
 		strcat(b, "VTR-Constant ");
 
 	if (s == 0) {
-		strcat(b, "Yes-OK-Signal");
+		strcat(b, "\e[1mYes-OK-Signal\e[0m");
 	}
 
 	return b;
 }
 
 int main(int argc, char *argv[]) {
-	open_device();
 
-	memset(&input, 0, sizeof(input));
+	open_device();
+	struct timeval now;
+	struct timeval future;
+	int rc;
+
+	rc = gettimeofday(&now, NULL);
+	if (rc == 0) {
+		//	printf("gettimeofday() successful.\n");
+		//	printf("time = %lu.%06lu\n", now.tv_sec, now.tv_usec);
+		memcpy(&future, &now, sizeof(future));
+		future.tv_sec += timeout;
+	} else {
+		printf("gettimeofday() failed, errno = %d\n", errno);
+		return -1;
+	}
 
 	uint32_t i = 0;
-	printf("== list of inputs ==\n");
+	uint32_t j = 0;
+	uint32_t m = 0;
+	// find the number of inputs
 	while (1) {
 		memset(&input, 0, sizeof(input)); // clean
 		input.index = i; // this one
 
-		int j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
+		j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
 
 		if (j == -1)
 			break; // no more inputs
 
-		// The input exists, lets use it and query again
-		uint32_t value;
-		j = ioctl(fd, VIDIOC_G_INPUT, &value);
-		if (j == -1) {
-			printf("can not happen, query input (VIDIOC_G_INPUT) failed\n");
-			break;
-		}
-
-		value = i; // set to other input
-		j = ioctl(fd, VIDIOC_S_INPUT, &value);
-		if (j == -1) {
-			printf("can not happen, query input (VIDIOC_G_INPUT) failed\n");
-			break;
-		}
-		usleep(50000);
-		// query again
-		j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
-		if (j == -1) {
-			printf("can not happen, query input (VIDIOC_ENUMINPUT) failed\n");
-			break;
-		}
-
-		printf("The selected input is %d\n", value);
-
-		printf("number    = %d\n", input.index);
-		printf("name      = %s\n", input.name);
-		printf("InputType = %s\n", inputtype[input.type]);
-		printf("Status    = %d\n", input.status);
-		printf("StatusText= %s\n\n", status_to_text(input.status, buf,
-				sizeof(buf)));
-
-		i++; // next please
-	}
-	if (i == 0)
-		printf("no inputs found\n");
-
-	// enumerate outputs
-	printf("== list of outputs ==\n");
-	i = 0;
-	while (1) {
-		memset(&output, 0, sizeof(output)); // clean
-		input.index = i; // this one
-
-		int j = ioctl(fd, VIDIOC_ENUMOUTPUT, &output); // get info
-
-		if (j == -1)
-			break; // no more
-
-		printf("number    = %d\n", output.index);
-		printf("name      = %s\n", output.name);
+		m = i; // new maximum
 		i++;
 	}
-	if (i == 0)
-		printf("no outputs found\n");
 
-	memset(&queryctrl, 0, sizeof(queryctrl));
-
-	for (queryctrl.id = V4L2_CID_BASE; queryctrl.id < V4L2_CID_LASTP1; queryctrl.id++) {
-		if (0 == ioctl(fd, VIDIOC_QUERYCTRL, &queryctrl)) {
-			if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
-				continue;
-
-			printf("Control   = %s\n", queryctrl.name);
-
-			if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
-				enumerate_menu();
-		} else {
-			if (errno == -1)
-				continue;
-
-			perror("VIDIOC_QUERYCTRL");
-			exit(EXIT_FAILURE);
-		}
+	if (i == 0) {
+		printf("video device has no inputs\n");
+		return -1;
 	}
 
-	for (queryctrl.id = V4L2_CID_PRIVATE_BASE;; queryctrl.id++) {
-		if (0 == ioctl(fd, VIDIOC_QUERYCTRL, &queryctrl)) {
-			if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
-				continue;
+	while (1) {
 
-			printf("Control %s\n", queryctrl.name);
+		printf("\e[1;1H== list of inputs ==\n");
+		i = 0;
+		while (i <= m) {
+			memset(&input, 0, sizeof(input)); // clean
+			input.index = i; // this one
 
-			if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
-				enumerate_menu();
-		} else {
-			if (errno == -1)
+			j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
+
+			if (j == -1)
+				break; // no more inputs
+
+			// The input exists, lets use it and query again
+			uint32_t value;
+			j = ioctl(fd, VIDIOC_G_INPUT, &value);
+			if (j == -1) {
+				printf("can not happen, query input (VIDIOC_G_INPUT) failed\n");
 				break;
+			}
 
-			perror("VIDIOC_QUERYCTRL");
-			exit(EXIT_FAILURE);
+			value = i; // set to other input
+			j = ioctl(fd, VIDIOC_S_INPUT, &value);
+			if (j == -1) {
+				printf("can not happen, query input (VIDIOC_G_INPUT) failed\n");
+				break;
+			}
+			usleep(50000);
+			// query again
+			j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
+			if (j == -1) {
+				printf(
+						"can not happen, query input (VIDIOC_ENUMINPUT) failed\n");
+				break;
+			}
+
+			// printf("The selected input is %d\n", value);
+
+			printf("input     = %d     \n", input.index);
+			printf("name      = %s     \n", input.name);
+			printf("InputType = %s     \n", inputtype[input.type]);
+			printf("Status    = %d     \n", input.status);
+			printf("StatusText= %s     \n\n", status_to_text(input.status, buf,
+					sizeof(buf)));
+
+			if (input.status == 0) {
+				goodsignal = 1; // true
+				// goodsignal found
+				goodinput = i;
+			}
+
+			i++; // next please
 		}
+		usleep(100000);
+		// did we timeout
+		rc = gettimeofday(&now, NULL);
+		if (rc == 0 && (future.tv_sec < now.tv_sec)) {
+			// timeout
+			break;
+		}
+
+		if (goodsignal) {
+			// select that input
+			uint32_t value = goodinput; // set to other input
+			printf("set input to %d\n",value);
+			j = ioctl(fd, VIDIOC_S_INPUT, &value);
+			if (j == -1) {
+				printf("can not happen, query input (VIDIOC_G_INPUT) failed\n");
+			}
+			// return value to ffmpeg
+			return goodinput;
+		}
+
 	}
 
-	return (0);
+	return (-1);
 }
