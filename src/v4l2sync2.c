@@ -51,21 +51,18 @@
 #include <linux/videodev.h>
 #include <stdint.h>
 
-struct v4l2_input input;
-struct v4l2_output output;
+struct v4l2_input g_vid_input;
+struct v4l2_output g_vid_output;
 
-int fd; // handle to device
+char *g_dev_name = "/dev/video0"; // default name
+char *g_inputtype_lookup[] = {"unknown", "tuner", "camera", 0, 0, 0, 0};
 
-char *dev_name = "/dev/video0"; // default name
-char *inputtype[] = {"unknown", "tuner", "camera", 0, 0, 0, 0};
+int g_timeout = 300; // default timeout in seconds
 
-int timeout = 300; // default timeout in seconds
-int shorttime = 50000; // microseconds to wait for input get ready
-
-int goodsignal = 0; // flag
-int goodinput = -1; // input number
-int verbose = 1; // verbose default
-int quick = 1; // quick exit default
+int g_have_signal_flag = 0; // flag
+int g_active_input_index = -1; // input number
+int g_verbose = 1; // verbose default
+int g_quick_exit = 1; // quick exit default
 
 int open_device(const char *dev_name) {
     struct stat st;
@@ -81,7 +78,7 @@ int open_device(const char *dev_name) {
         return (-1);
     }
 
-    fd = open(dev_name, O_RDWR /* required */ | O_NONBLOCK, 0);
+    int fd = open(dev_name, O_RDWR /* required */ | O_NONBLOCK, 0);
 
     if (-1 == fd) {
         fprintf(stderr, "Cannot open '%s': %d, %s\n", dev_name, errno,
@@ -133,17 +130,19 @@ char *status_to_text(int s, char *b, int len) {
 }
 
 int do_the_work(void) {
-    struct timeval now;
-    struct timeval future;
-    int rc = 0;
+    struct timeval now = {0};
+    struct timeval future = {0};
+    int rc = -1;
+    int g_fd = -1;
 
-    if (-1 == open_device(dev_name))
-        return (-1); // exit on fail
+    if ((g_fd = open_device(g_dev_name)) < 0)
+        return -1; // exit on fail
+
 
     rc = gettimeofday(&now, NULL);
     if (rc == 0) {
         memcpy(&future, &now, sizeof (future));
-        future.tv_sec += timeout;
+        future.tv_sec += g_timeout;
     } else {
         fprintf(stderr, "gettimeofday() failed, errno = %d\n", errno);
         return -1;
@@ -154,10 +153,10 @@ int do_the_work(void) {
     uint32_t m = 0;
     // find the number of inputs
     while (1) {
-        memset(&input, 0, sizeof (input)); // clean
-        input.index = i; // this one
+        memset(&g_vid_input, 0, sizeof (g_vid_input)); // clean
+        g_vid_input.index = i; // this one
 
-        j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
+        j = ioctl(g_fd, VIDIOC_ENUMINPUT, &g_vid_input); // get info
 
         if (j == -1)
             break; // no more inputs
@@ -171,30 +170,30 @@ int do_the_work(void) {
         return -1;
     }
     while (1) {
-        if (verbose) {
+        if (g_verbose) {
             printf("\e[1;1H== list of inputs ==\n");
         }
 
         i = 0;
         while (i <= m) {
-            memset(&input, 0, sizeof (input)); // clean
-            input.index = i; // this one
+            memset(&g_vid_input, 0, sizeof (g_vid_input)); // clean
+            g_vid_input.index = i; // this one
 
-            j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
+            j = ioctl(g_fd, VIDIOC_ENUMINPUT, &g_vid_input); // get info
 
             if (j == -1)
                 break; // invalid ioctl
 
             // The input exists, lets use it and query again
             uint32_t value;
-            j = ioctl(fd, VIDIOC_G_INPUT, &value);
+            j = ioctl(g_fd, VIDIOC_G_INPUT, &value);
             if (j == -1) {
                 fprintf(stderr, "query input (VIDIOC_G_INPUT) failed\n");
                 break;
             }
 
             value = i; // set to other input
-            j = ioctl(fd, VIDIOC_S_INPUT, &value);
+            j = ioctl(g_fd, VIDIOC_S_INPUT, &value);
             if (j == -1) {
                 fprintf(stderr, "setting input (VIDIOC_S_INPUT) failed\n");
                 break;
@@ -202,44 +201,44 @@ int do_the_work(void) {
             // give it time
             usleep(50000);
             // query again
-            j = ioctl(fd, VIDIOC_ENUMINPUT, &input); // get info
+            j = ioctl(g_fd, VIDIOC_ENUMINPUT, &g_vid_input); // get info
             if (j == -1) {
                 fprintf(stderr, "enum input (VIDIOC_ENUMINPUT) failed\n");
                 break;
             }
-            if (verbose) {
+            if (g_verbose) {
                 char buf[100]; // string buf
-                printf("input     = %d     \n", input.index);
-                printf("name      = %s     \n", input.name);
-                printf("InputType = %s     \n", inputtype[input.type]);
-                printf("Status    = %d     \n", input.status);
-                printf("StatusText= %s     \n\n", status_to_text(input.status,
+                printf("input     = %d     \n", g_vid_input.index);
+                printf("name      = %s     \n", g_vid_input.name);
+                printf("InputType = %s     \n", g_inputtype_lookup[g_vid_input.type]);
+                printf("Status    = %d     \n", g_vid_input.status);
+                printf("StatusText= %s     \n\n", status_to_text(g_vid_input.status,
                         buf, sizeof (buf)));
             }
 
             // force some flags to zero
             // they are not real problems
-            input.status &= ~(V4L2_IN_ST_MACROVISION | V4L2_IN_ST_HFLIP
+            g_vid_input.status &= ~(V4L2_IN_ST_MACROVISION | V4L2_IN_ST_HFLIP
                     | V4L2_IN_ST_VFLIP);
 
-            if (input.status == 0) {
-                goodsignal = 1; // true
-                goodinput = i; // the good input
+            if (g_vid_input.status == 0) {
+                g_have_signal_flag = 1; // true
+                g_active_input_index = i; // the good input
             }
 
             i++; // next please
         }
 
         // quick exit
-        if (goodsignal && quick) {
-            uint32_t value = goodinput; // set to other input
+        if (g_have_signal_flag && g_quick_exit) {
+            uint32_t value = g_active_input_index; // set to other input
             fprintf(stderr, "set input to %d\n", value);
-            j = ioctl(fd, VIDIOC_S_INPUT, &value);
+            j = ioctl(g_fd, VIDIOC_S_INPUT, &value);
             if (j == -1) {
                 fprintf(stderr, "set input failed (VIDIOC_S_INPUT)\n");
             }
 
-            return (goodinput);
+            return (g_active_input_index);
         }
 
         // wait a while before we try again
@@ -252,31 +251,26 @@ int do_the_work(void) {
         }
     }
 
-    if (goodsignal) {
+    if (g_have_signal_flag) {
         // select that input
-        uint32_t value = goodinput; // set to other input
+        uint32_t value = g_active_input_index; // set to other input
         fprintf(stderr, "set input to %d\n", value);
-        j = ioctl(fd, VIDIOC_S_INPUT, &value);
+        j = ioctl(g_fd, VIDIOC_S_INPUT, &value);
         if (j == -1) {
             fprintf(stderr, "set input failed (VIDIOC_S_INPUT)\n");
         }
-        return (goodinput);
+        return (g_active_input_index);
     }
 }
 
 int main(int argc, char *argv[]) {
     int c;
-
+    
     while (1) {
         static struct option long_options[] = {
             /* These options set a flag. */
-            {"verbose", no_argument, &verbose, 1},
-            {"brief", no_argument, &verbose, 0},
-            /* These options don't set a flag.
-               We distinguish them by their indices. */
-            // {"add", no_argument, 0, 'a'},
-            //  {"append", no_argument, 0, 'b'},
-            //  {"delete", required_argument, 0, 'd'},
+            {"verbose", no_argument, &g_verbose, 1},
+            {"brief", no_argument, &g_verbose, 0},
             {"keeprunning", no_argument, 0, 'k'},
             {"file", required_argument, 0, 'f'},
             {"timeout", required_argument, 0, 't'},
@@ -285,7 +279,7 @@ int main(int argc, char *argv[]) {
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long(argc, argv, /* "abc:d:f:" */ "t:f:",
+        c = getopt_long(argc, argv, "kt:f:",
                 long_options, &option_index);
 
         /* Detect the end of the options. */
@@ -305,20 +299,20 @@ int main(int argc, char *argv[]) {
 
             case 'k':
                 puts("option -k (--keeprunning)\n");
-                quick = 0;
+                g_quick_exit = 0;
                 break;
 
 
             case 'f':
                 printf("option -f (--file) with value `%s'\n", optarg);
-                dev_name = strdup(optarg);
+                g_dev_name = strdup(optarg);
                 break;
             case 't': // timeout
-                timeout = atoi(optarg);
+                g_timeout = atoi(optarg);
                 break;
             case '?':
                 /* getopt_long already printed an error message. */
-                fprintf(stderr,"(C) GPL2, edwin@oetelaar.com\n"
+                fprintf(stderr, "(C) GPL2, edwin@oetelaar.com\n"
                         "Test and set video4linux input based on probing sync\n"
                         "Valid options are: \n--timeout nSecs\n"
                         "--verbose\n--brief\n--keeprunning\n"
@@ -331,7 +325,6 @@ int main(int argc, char *argv[]) {
                 abort();
         }
     }
-
 
     /* Print any remaining command line arguments (not options). */
     if (optind < argc) {
